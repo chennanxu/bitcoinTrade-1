@@ -4,7 +4,12 @@ from flask import render_template,jsonify,request
 import HuobiService
 from helpler import ts_to_time
 from subprocess import Popen
+import pandas as pd
+import numpy as np
+import xgboost as xgb
+
 from app import trade_proc
+
 
 menus=[
     {"target":"index","name":u"自动炒币","state":"","icon":"icon-edit"},
@@ -167,6 +172,14 @@ def get_trade_state():
         return jsonify({"status": "running"})
 
 
+@app.route('/api/predict')
+def get_predict():
+    regr = xgb.Booster({'nthread': 1})  # init model
+    curkline = HuobiService.get_kline('btcusdt','1min',1)
+    regr.load_model("xgb.model")  # load data
+
+    y_pred_xgb = regr.predict(dtest)
+    y_pred = np.exp(y_pred_xgb)
 @app.route('/checkCapital', methods=['GET', 'POST'])
 def checkCapital():
 
@@ -177,3 +190,5 @@ def checkCapital():
 
 
 
+if __name__ == '__main__':
+    print(HuobiService.get_kline('btcusdt','1min',1))

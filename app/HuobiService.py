@@ -418,4 +418,4 @@ if __name__ == '__main__':
 
     #print get_balance()
 
-    print get_kline(symbol="btcusdt",period="60min",size=150)
+    print get_kline(symbol="btcusdt",period="1min",size=1)
