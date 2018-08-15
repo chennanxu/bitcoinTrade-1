@@ -1,14 +1,23 @@
 #-*-coding:utf-8-*-
+from sklearn.metrics import mean_squared_error
+
 from app import app
-from flask import render_template,jsonify,request
+from flask import render_template, jsonify, request, url_for
 import HuobiService
-from helpler import ts_to_time
+
+from helpler import ts_to_time, get_nextmin
 from subprocess import Popen
 import pandas as pd
 import numpy as np
 import xgboost as xgb
+import os
 
 from app import trade_proc
+
+
+
+import datetime
+import time
 
 
 menus=[
@@ -17,6 +26,40 @@ menus=[
     #{"target":"index","name":"desktop","state":"","icon":"icon-dashboard"}
 ]
 
+
+
+def getMatchresults():
+    result={
+          "status": "ok",
+          "data": [
+            {
+              "id": 29555,
+              "order-id": 59378,
+              "match-id": 59335,
+              "symbol": "ethusdt",
+              "type": "buy-limit",
+              "source": "api",
+              "price": "100.1000000000",
+              "filled-amount": "0.9845000000",
+              "filled-fees": "0.0019690000",
+              "created-at": 1533200046000
+            },
+              {
+                  "id": 29555,
+                  "order-id": 59378,
+                  "match-id": 59335,
+                  "symbol": "ethusdt",
+                  "type": "sell-limit",
+                  "source": "api",
+                  "price": "101.1000000000",
+                  "filled-amount": "0.9845000000",
+                  "filled-fees": "0.0019690000",
+                  "created-at": 1533100046000
+              }
+
+          ]
+        }
+    return result
 
 def fillMenus(menus,index):
     for i in range(len(menus)):
@@ -32,7 +75,7 @@ def index():
 
     #return render_template("index.html")
     fillMenus(menus,0)
-    print menus
+    #print menus
     return render_template("/used/index.html",menus=menus)
 
 
@@ -174,21 +217,157 @@ def get_trade_state():
 
 @app.route('/api/predict')
 def get_predict():
-    regr = xgb.Booster({'nthread': 1})  # init model
+    regr = get_model()
+    select_feat = ['open', 'high', 'low', 'close', 'vol', 'amount', 'count', 'oc', 'lh']
     curkline = HuobiService.get_kline('btcusdt','1min',1)
-    regr.load_model("xgb.model")  # load data
+    curdata = dict()
+    #print(int(curkline['ts']))
+    curdata['time'] = (curkline['ts'])/1000
+    #print(curdata['ts'])
+    curdata['close'] = curkline['data'][0]['close']
 
-    y_pred_xgb = regr.predict(dtest)
+    testdata = pd.DataFrame(curkline['data'])
+    testdata['oc'] = (testdata['open'] - testdata['close'])
+    testdata['lh'] = (testdata['high'] - testdata['low'])
+
+    testdata = testdata[select_feat]
+
+    # train_data = xgb.DMatrix(train_data)
+    # print(train_data)
+    y_pred_xgb = regr.predict(testdata)
     y_pred = np.exp(y_pred_xgb)
+
+    pred_time = get_nextmin(int(curkline['ts'])/1000)
+    predict_data = dict()
+    predict_data['time'] = pred_time
+    predict_data['close'] = int(y_pred[0])
+    #print(predict_data)
+
+    return jsonify({
+                     'curdata': curdata,
+                     'pred_data': predict_data
+            })
+
+@app.route("/api/check/getkline",methods=['GET', 'POST'])
+def checkGetKline():
+    symbol=request.args.get("symbol")
+    period=request.args.get("period")
+    size=request.args.get("size",type=int,default=150)
+    #print symbol,period,size
+    infos=HuobiService.get_kline(symbol, period, size)
+    #print infos
+    klines=[]
+    times=[]
+    buyLimit=[]
+    sellLimit=[]
+    curTime=datetime.datetime.now()
+    #print curTime
+    for item in infos["data"]:
+        tmp=[]
+        tmp.append(item["open"])
+        tmp.append(item["close"])
+        tmp.append(item["low"])
+        tmp.append(item["high"])
+        buyLimit.append(0)
+        sellLimit.append(0)
+        klines.append(tmp)
+        #times.append(time.strftime("%d %M"),curTime)
+        times.append(curTime.strftime("%m-%d %H"))
+        if period=="30min":
+            curTime-=datetime.timedelta(minutes=1)
+        elif period=="60min":
+            curTime-=datetime.timedelta(hours=1)
+        elif period=="1day":
+            curTime-=datetime.timedelta(days=1)
+
+
+    #print times
+    klines.reverse()
+    times.reverse()
+
+    matchresults=getMatchresults()
+    matchRecords=[]
+
+    for item in matchresults["data"]:
+        #print item["created-at"]
+        timeTmp=time.strftime("%m-%d %H",time.localtime(item["created-at"]/1000))
+        index=times.index(timeTmp)
+        #print index
+        if item["type"]=="buy-limit":
+            buyLimit[index]=item["filled-amount"]
+        elif item["type"]=="sell-limit":
+            sellLimit[index]=item["filled-amount"]
+
+
+        tmpItem=[]
+        tmpItem.append(item["type"])
+        tmpItem.append(time.strftime("%Y-%m-%d %H:%M:%S",time.localtime(item["created-at"]/1000)))
+        tmpItem.append(item["filled-amount"])
+        tmpItem.append(item["filled-fees"])
+        tmpItem.append(item["price"])
+
+
+        matchRecords.append(tmpItem)
+    return jsonify({"klines":klines,
+                    "times":times,
+                    "buy-limit":buyLimit,
+                    "sell-limit":sellLimit,
+                    "matchRecords":matchRecords})
+
+@app.route("/api/check/getBalance",methods=['GET', 'POST'])
+def checkGetBalance():
+    balances=HuobiService.get_balance()
+    #print balances
+    tradeBalance=0
+    frozenBalance=0
+    #print balances
+    for item in  balances["data"]["list"]:
+        if item["currency"]=="usdt" and item["type"]=="trade":
+            tradeBalance=item["balance"]
+        if item["currency"] == "usdt" and item["type"] == "frozen":
+            frozenBalance = item["balance"]
+    return jsonify({"tradeBalance":tradeBalance,"frozenBalance":frozenBalance})
+
 @app.route('/checkCapital', methods=['GET', 'POST'])
 def checkCapital():
 
     #return render_template("index.html")
     fillMenus(menus,1)
-    print menus
+    #print menus
     return render_template("/used/check.html",menus=menus)
 
+def get_model():
+    kline_data = HuobiService.get_kline('btcusdt','1min',2000)
+    kline_data = kline_data['data']
+    train_df = pd.DataFrame(kline_data)
+    train_df['oc'] = (train_df['open'] - train_df['close'])
+    train_df['lh'] = (train_df['high'] - train_df['low'])
+    label = train_df[:-1]['close']
+    train_df = train_df[1:]
+    train_df = train_df.reset_index(drop=True)
+    train_df['label'] = label
+    select_feat = ['open', 'high', 'low', 'close', 'vol', 'amount', 'count', 'oc', 'lh']
+    label_df = pd.DataFrame(index=train_df.index, columns=["label"])
+    label_df["label"] = np.log(train_df["label"])
+    train_df = train_df[select_feat]
 
+    def rmse(y_true, y_pred):
+        return np.sqrt(mean_squared_error(y_true, y_pred))
+
+    regr = xgb.XGBRegressor(
+        colsample_bytree=0.5,
+        gamma=0.0,
+        learning_rate=0.01,
+        max_depth=6,
+        min_child_weight=1.5,
+        n_estimators=2200,
+        reg_alpha=0.9,
+        reg_lambda=0.6,
+        subsample=0.8,
+        seed=2018,
+        silent=1)
+    regr.fit(train_df, label_df)
+    return regr
 
 if __name__ == '__main__':
     print(HuobiService.get_kline('btcusdt','1min',1))
